@@ -242,16 +242,6 @@ async def analyze_profile(user_profile: UserProfile):
 
 
 
-# Additional endpoint to handle requests with invalid JSON format
-
-
-@app.post("/analyze_profile", response_model=UserCategorization)
-async def analyze_profile(user_profile: UserProfile):
-    result = categorize_user(user_profile)  # or your logic here
-    return JSONResponse(content=result.dict())  # Forces JSON output
-
-
-
 # Additional endpoint to get questionnaire structure
 @app.get("/questionnaire")
 def get_questionnaire():
