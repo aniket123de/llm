@@ -72,7 +72,8 @@ def categorize_user(user_vector):
         goal = user_vector[0]
         risk = user_vector[1]
         freq = user_vector[2]
-        horizon = user_vector[len(asset_options)+4]
+        # Fix the index for time_horizon - it's 3 positions after the assets array ends
+        horizon = user_vector[3 + len(asset_options)]
         capital = user_vector[-2]
 
         if goal == 0 and risk <= 1 and horizon == 3:
@@ -110,9 +111,13 @@ def preprocess_lstm_data(df):
 
         X, y = [], []
         seq_len = 60
+        # Make sure we have enough data
+        if len(scaled) <= seq_len:
+            raise ValueError(f"Not enough data points for LSTM. Need at least {seq_len+1} but got {len(scaled)}")
+            
         for i in range(seq_len, len(scaled)):
             X.append(scaled[i-seq_len:i])
-            y.append(scaled[i, 1])
+            y.append(scaled[i, 1])  # Using Close price as target
 
         return np.array(X), np.array(y), scaler
     except Exception as e:
@@ -139,8 +144,18 @@ def build_lstm_model(input_shape):
 def is_stock_upward_trending(df):
     """Check if stock is trending upward with error handling"""
     try:
+        # Make sure we have enough data for moving averages
+        if len(df) < 50:
+            raise ValueError(f"Not enough data points for trend analysis. Need at least 50 but got {len(df)}")
+            
         df['MA20'] = df['Close'].rolling(20).mean()
         df['MA50'] = df['Close'].rolling(50).mean()
+        
+        # Check for NaN values
+        if df['MA20'].iloc[-1] is None or np.isnan(df['MA20'].iloc[-1]) or \
+           df['MA50'].iloc[-1] is None or np.isnan(df['MA50'].iloc[-1]):
+            raise ValueError("Moving averages contain NaN values")
+            
         latest_ma20 = df['MA20'].iloc[-1]
         latest_ma50 = df['MA50'].iloc[-1]
         return latest_ma20 > latest_ma50
@@ -153,6 +168,10 @@ def recommend_stocks(category):
     """Recommend stocks based on category with error handling"""
     try:
         tickers = category_stocks.get(category, [])
+        if not tickers:
+            logger.warning(f"No stocks found for category: {category}")
+            return []
+            
         logger.info(f"Checking trends for category: {category}...")
 
         results = []
@@ -185,7 +204,8 @@ def read_root():
         "version": "1.0.0",
         "endpoints": {
             "/asset_options": "Get list of available asset options",
-            "/analyze_profile": "Submit user profile and get investment categorization with recommendations"
+            "/analyze_profile": "Submit user profile and get investment categorization with recommendations",
+            "/questionnaire": "Get the structure of the questionnaire for the frontend"
         }
     }
 
@@ -211,6 +231,14 @@ def get_asset_options():
 @app.post("/analyze_profile", response_model=UserCategorization)
 async def analyze_profile(user_profile: UserProfile):
     try:
+        # Validate assets indices
+        for asset_idx in user_profile.assets:
+            if asset_idx < 0 or asset_idx >= len(asset_options):
+                raise HTTPException(
+                    status_code=400, 
+                    detail=f"Invalid asset index: {asset_idx}. Must be between 0 and {len(asset_options)-1}"
+                )
+        
         # Convert user profile to vector format
         assets_vector = [1 if i in user_profile.assets else 0 for i in range(len(asset_options))]
         user_vector = [
@@ -236,10 +264,12 @@ async def analyze_profile(user_profile: UserProfile):
             category=category,
             recommendations=stocks
         )
+    except HTTPException as he:
+        # Re-raise HTTP exceptions
+        raise he
     except Exception as e:
         logger.error(f"Error analyzing profile: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error analyzing profile: {str(e)}")
-
 
 
 # Additional endpoint to get questionnaire structure
