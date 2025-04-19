@@ -9,6 +9,7 @@ from keras.models import Sequential
 from keras.layers import LSTM, Dense, Dropout
 from fastapi.middleware.cors import CORSMiddleware
 import json
+from fastapi.responses import JSONResponse
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -242,12 +243,13 @@ async def analyze_profile(user_profile: UserProfile):
 
 
 # Additional endpoint to handle requests with invalid JSON format
+
+
 @app.post("/analyze_profile", response_model=UserCategorization)
 async def analyze_profile(user_profile: UserProfile):
-    return {
-        "detail": "Invalid JSON format in request body",
-        "error": str(exc)
-    }
+    result = categorize_user(user_profile)  # or your logic here
+    return JSONResponse(content=result.dict())  # Forces JSON output
+
 
 
 # Additional endpoint to get questionnaire structure
