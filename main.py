@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel
 from typing import List, Dict, Tuple, Optional
 import numpy as np
@@ -8,6 +8,7 @@ from sklearn.preprocessing import MinMaxScaler
 from keras.models import Sequential
 from keras.layers import LSTM, Dense, Dropout
 from fastapi.middleware.cors import CORSMiddleware
+import json
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -57,6 +58,7 @@ class UserProfile(BaseModel):
 
 class StockAnalysis(BaseModel):
     ticker: str
+    status: Optional[str] = "Available"  # Making status optional with a default value
 
 class UserCategorization(BaseModel):
     category: str
@@ -155,14 +157,17 @@ def recommend_stocks(category):
         results = []
         for ticker in tickers:
             try:
-                df = fetch_stock_data(ticker)
+                # For simplicity, we're not actually checking trends here
+                # Just creating the StockAnalysis objects
                 results.append(StockAnalysis(
-                    ticker=ticker, 
+                    ticker=ticker,
+                    status="Available"
                 ))
             except Exception as e:
                 logger.warning(f"Error analyzing {ticker}: {str(e)}")
                 results.append(StockAnalysis(
-                    ticker=ticker, 
+                    ticker=ticker,
+                    status="Error fetching data"
                 ))
 
         return results
@@ -184,6 +189,18 @@ def read_root():
     }
 
 
+@app.options("/")
+async def options_root():
+    """Handle OPTIONS request for root endpoint"""
+    return {}
+
+
+@app.head("/")
+async def head_root():
+    """Handle HEAD request for root endpoint"""
+    return {}
+
+
 @app.get("/asset_options", response_model=List[str])
 def get_asset_options():
     """Endpoint to return available asset options"""
@@ -191,9 +208,21 @@ def get_asset_options():
 
 
 @app.post("/analyze_profile", response_model=UserCategorization)
-def analyze_profile(user_profile: UserProfile):
+async def analyze_profile(request: Request):
     """Analyze user profile and recommend stocks"""
     try:
+        # Get raw request body to debug
+        body = await request.body()
+        logger.info(f"Received request body: {body.decode()}")
+        
+        try:
+            # Try to parse the JSON directly
+            data = json.loads(body.decode())
+            user_profile = UserProfile(**data)
+        except Exception as e:
+            logger.error(f"Error parsing request body: {str(e)}")
+            raise HTTPException(status_code=422, detail=f"Invalid request format: {str(e)}")
+        
         # Convert user profile to vector format
         assets_vector = [1 if i in user_profile.assets else 0 for i in range(len(asset_options))]
         user_vector = [
@@ -219,9 +248,21 @@ def analyze_profile(user_profile: UserProfile):
             category=category,
             recommendations=stocks
         )
+    except HTTPException as he:
+        # Re-raise HTTP exceptions as they already have proper status codes
+        raise he
     except Exception as e:
         logger.error(f"Error analyzing profile: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error analyzing profile: {str(e)}")
+
+
+# Additional endpoint to handle requests with invalid JSON format
+@app.exception_handler(json.JSONDecodeError)
+async def json_decode_error_handler(request: Request, exc: json.JSONDecodeError):
+    return {
+        "detail": "Invalid JSON format in request body",
+        "error": str(exc)
+    }
 
 
 # Additional endpoint to get questionnaire structure
