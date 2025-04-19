@@ -242,8 +242,8 @@ async def analyze_profile(user_profile: UserProfile):
 
 
 # Additional endpoint to handle requests with invalid JSON format
-@app.exception_handler(json.JSONDecodeError)
-async def json_decode_error_handler(request: Request, exc: json.JSONDecodeError):
+@app.post("/analyze_profile", response_model=UserCategorization)
+async def analyze_profile(user_profile: UserProfile):
     return {
         "detail": "Invalid JSON format in request body",
         "error": str(exc)
