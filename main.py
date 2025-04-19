@@ -208,21 +208,8 @@ def get_asset_options():
 
 
 @app.post("/analyze_profile", response_model=UserCategorization)
-async def analyze_profile(request: Request):
-    """Analyze user profile and recommend stocks"""
+async def analyze_profile(user_profile: UserProfile):
     try:
-        # Get raw request body to debug
-        body = await request.body()
-        logger.info(f"Received request body: {body.decode()}")
-        
-        try:
-            # Try to parse the JSON directly
-            data = json.loads(body.decode())
-            user_profile = UserProfile(**data)
-        except Exception as e:
-            logger.error(f"Error parsing request body: {str(e)}")
-            raise HTTPException(status_code=422, detail=f"Invalid request format: {str(e)}")
-        
         # Convert user profile to vector format
         assets_vector = [1 if i in user_profile.assets else 0 for i in range(len(asset_options))]
         user_vector = [
@@ -248,12 +235,10 @@ async def analyze_profile(request: Request):
             category=category,
             recommendations=stocks
         )
-    except HTTPException as he:
-        # Re-raise HTTP exceptions as they already have proper status codes
-        raise he
     except Exception as e:
         logger.error(f"Error analyzing profile: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error analyzing profile: {str(e)}")
+
 
 
 # Additional endpoint to handle requests with invalid JSON format
