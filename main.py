@@ -1,236 +1,258 @@
-from fastapi import FastAPI, HTTPException, Request
-from pydantic import BaseModel
-from typing import List, Dict, Tuple, Optional
-import numpy as np
-import yfinance as yf
-import logging
-from sklearn.preprocessing import MinMaxScaler
-from keras.models import Sequential
-from keras.layers import LSTM, Dense, Dropout
-from fastapi.middleware.cors import CORSMiddleware
-import json
+from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.responses import JSONResponse
+from fastapi.exceptions import RequestValidationError
+from pydantic import BaseModel, ValidationError
+import json
+import logging
+import traceback
+from typing import List, Dict, Any, Optional
+import uuid
+import time
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
+# Create a custom logger configuration
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s %(levelname)s: %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S',
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler("api.log")
+    ]
+)
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="Investment Profile API", 
-              description="API for analyzing user investment profiles and recommending stocks",
-              version="1.0.0")
+# Error response model for consistent error reporting
+class ErrorResponse(BaseModel):
+    status_code: int
+    error: str
+    detail: Any
+    path: str
+    timestamp: str
+    request_id: str
 
-# Add CORS middleware to allow React Native app to call the API
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # Allows all origins - adjust for production
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# Assets multi-select reference
-asset_options = [
-    "Stocks (Large-cap)",     # 0
-    "Stocks (Mid-cap)",       # 1
-    "Stocks (Small-cap)",     # 2
-]
-
-# Stock recommendations for each category
-category_stocks = {
-    "Long-Term Investor": ["AAPL", "MSFT", "TCS.NS", "INFY.NS", "RELIANCE.NS"],
-    "Swing Trader": ["SBIN.NS", "HDFCBANK.NS", "AXISBANK.NS", "ITC.NS"],
-    "Day Trader": ["ADANIENT.NS", "TATAMOTORS.NS", "VEDL.NS", "YESBANK.NS"],
-    "Experimental Trader": ["DOGE-USD", "BTC-USD", "PENNY.STOCK"],  # dummy entry
-    "Balanced Investor": ["NIFTYBEES.NS", "ICICIBANK.NS", "HCLTECH.NS"]
-}
-
-# Pydantic models for request/response validation
-class UserProfile(BaseModel):
-    goal: int
-    risk: int
-    frequency: int
-    assets: List[int]
-    volatility_reaction: int
-    time_horizon: int
-    decision_making: int
-    emotion: int
-    capital: int
-    trading_style: int
-
-class StockAnalysis(BaseModel):
-    ticker: str
-    status: Optional[str] = "Available"  # Making status optional with a default value
-
-class UserCategorization(BaseModel):
-    category: str
-    recommendations: List[StockAnalysis]
-
-
-def categorize_user(user_vector):
-    """Categorize user based on their inputs"""
+# Request tracking middleware
+@app.middleware("http")
+async def request_middleware(request: Request, call_next):
+    # Generate unique request ID
+    request_id = str(uuid.uuid4())
+    request.state.request_id = request_id
+    
+    # Log the incoming request
+    logger.info(f"Request {request_id}: {request.method} {request.url.path}")
+    
+    # Track request time
+    start_time = time.time()
+    
     try:
-        goal = user_vector[0]
-        risk = user_vector[1]
-        freq = user_vector[2]
-        # Fix the index for time_horizon - it's 3 positions after the assets array ends
-        horizon = user_vector[3 + len(asset_options)]
-        capital = user_vector[-2]
-
-        if goal == 0 and risk <= 1 and horizon == 3:
-            return "Long-Term Investor"
-        elif goal == 2 and risk >= 2:
-            return "Day Trader"
-        elif freq == 1 and risk == 1:
-            return "Swing Trader"
-        elif capital == 0 and risk >= 2:
-            return "Experimental Trader"
-        else:
-            return "Balanced Investor"
-    except Exception as e:
-        logger.error(f"Error in user categorization: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error categorizing user: {str(e)}")
-
-
-def fetch_stock_data(ticker="AAPL", period="6mo", interval="1d"):
-    """Fetch stock data with error handling"""
-    try:
-        data = yf.download(ticker, period=period, interval=interval)
-        if data.empty:
-            raise ValueError(f"No data found for ticker {ticker}")
-        return data[['Open', 'Close', 'Volume']]
-    except Exception as e:
-        logger.error(f"Error fetching stock data for {ticker}: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error fetching stock data for {ticker}: {str(e)}")
-
-
-def preprocess_lstm_data(df):
-    """Preprocess data for LSTM model"""
-    try:
-        scaler = MinMaxScaler()
-        scaled = scaler.fit_transform(df)
-
-        X, y = [], []
-        seq_len = 60
-        # Make sure we have enough data
-        if len(scaled) <= seq_len:
-            raise ValueError(f"Not enough data points for LSTM. Need at least {seq_len+1} but got {len(scaled)}")
-            
-        for i in range(seq_len, len(scaled)):
-            X.append(scaled[i-seq_len:i])
-            y.append(scaled[i, 1])  # Using Close price as target
-
-        return np.array(X), np.array(y), scaler
-    except Exception as e:
-        logger.error(f"Error in data preprocessing: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error in data preprocessing: {str(e)}")
-
-
-def build_lstm_model(input_shape):
-    """Build LSTM model with error handling"""
-    try:
-        model = Sequential()
-        model.add(LSTM(50, return_sequences=True, input_shape=input_shape))
-        model.add(Dropout(0.2))
-        model.add(LSTM(50))
-        model.add(Dropout(0.2))
-        model.add(Dense(1))
-        model.compile(optimizer='adam', loss='mean_squared_error')
-        return model
-    except Exception as e:
-        logger.error(f"Error building LSTM model: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error building LSTM model: {str(e)}")
-
-
-def is_stock_upward_trending(df):
-    """Check if stock is trending upward with error handling"""
-    try:
-        # Make sure we have enough data for moving averages
-        if len(df) < 50:
-            raise ValueError(f"Not enough data points for trend analysis. Need at least 50 but got {len(df)}")
-            
-        df['MA20'] = df['Close'].rolling(20).mean()
-        df['MA50'] = df['Close'].rolling(50).mean()
+        # Process the request
+        response = await call_next(request)
         
-        # Check for NaN values
-        if df['MA20'].iloc[-1] is None or np.isnan(df['MA20'].iloc[-1]) or \
-           df['MA50'].iloc[-1] is None or np.isnan(df['MA50'].iloc[-1]):
-            raise ValueError("Moving averages contain NaN values")
-            
-        latest_ma20 = df['MA20'].iloc[-1]
-        latest_ma50 = df['MA50'].iloc[-1]
-        return latest_ma20 > latest_ma50
+        # Log the response time and status
+        process_time = time.time() - start_time
+        logger.info(f"Request {request_id} completed: {response.status_code} in {process_time:.3f}s")
+        
+        # Add request ID to response headers
+        response.headers["X-Request-ID"] = request_id
+        return response
+        
     except Exception as e:
-        logger.error(f"Error analyzing stock trend: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error analyzing stock trend: {str(e)}")
+        # Log unhandled exceptions
+        process_time = time.time() - start_time
+        logger.error(f"Request {request_id} failed after {process_time:.3f}s: {str(e)}")
+        logger.error(traceback.format_exc())
+        
+        # Create a formatted error response
+        error_response = ErrorResponse(
+            status_code=500,
+            error="Internal Server Error",
+            detail=str(e),
+            path=request.url.path,
+            timestamp=time.strftime("%Y-%m-%d %H:%M:%S"),
+            request_id=request_id
+        )
+        
+        return JSONResponse(
+            status_code=500,
+            content=error_response.model_dump()
+        )
 
+# Handler for Pydantic validation errors (422 Unprocessable Entity)
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    """
+    Handle validation errors from FastAPI/Pydantic with detailed field errors
+    """
+    # Extract request ID
+    request_id = getattr(request.state, "request_id", str(uuid.uuid4()))
+    
+    # Format validation errors into a more readable structure
+    formatted_errors = []
+    for error in exc.errors():
+        # Extract the field location, type, and message
+        loc = " -> ".join(str(loc_item) for loc_item in error.get("loc", []))
+        err_type = error.get("type", "")
+        msg = error.get("msg", "")
+        
+        formatted_errors.append({
+            "field": loc,
+            "type": err_type,
+            "message": msg
+        })
+    
+    # Log validation error with useful context
+    logger.warning(f"Validation error on request {request_id} to {request.url.path}: {formatted_errors}")
+    
+    # Create error response
+    error_response = ErrorResponse(
+        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        error="Validation Error",
+        detail={
+            "errors": formatted_errors,
+            "body": await get_request_body(request)  # Add the request body for debugging
+        },
+        path=request.url.path,
+        timestamp=time.strftime("%Y-%m-%d %H:%M:%S"),
+        request_id=request_id
+    )
+    
+    return JSONResponse(
+        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        content=error_response.model_dump()
+    )
 
-def recommend_stocks(category):
-    """Recommend stocks based on category with error handling"""
+# Handler for JSON decode errors
+@app.exception_handler(json.JSONDecodeError)
+async def json_decode_error_handler(request: Request, exc: json.JSONDecodeError):
+    """
+    Handle malformed JSON in request body
+    """
+    request_id = getattr(request.state, "request_id", str(uuid.uuid4()))
+    logger.warning(f"JSON decode error on request {request_id}: {str(exc)}")
+    
+    # Try to get the raw body to include in the error response
     try:
-        tickers = category_stocks.get(category, [])
-        if not tickers:
-            logger.warning(f"No stocks found for category: {category}")
-            return []
-            
-        logger.info(f"Checking trends for category: {category}...")
+        body = await request.body()
+        body_str = body.decode("utf-8")
+    except Exception:
+        body_str = "<Failed to decode request body>"
+    
+    error_response = ErrorResponse(
+        status_code=status.HTTP_400_BAD_REQUEST,
+        error="Invalid JSON",
+        detail={
+            "message": f"Invalid JSON format at position {exc.pos}: {exc.msg}",
+            "received_body": body_str[:1000]  # Limit to first 1000 chars
+        },
+        path=request.url.path,
+        timestamp=time.strftime("%Y-%m-%d %H:%M:%S"),
+        request_id=request_id
+    )
+    
+    return JSONResponse(
+        status_code=status.HTTP_400_BAD_REQUEST,
+        content=error_response.model_dump()
+    )
 
-        results = []
-        for ticker in tickers:
-            try:
-                # For simplicity, we're not actually checking trends here
-                # Just creating the StockAnalysis objects
-                results.append(StockAnalysis(
-                    ticker=ticker,
-                    status="Available"
-                ))
-            except Exception as e:
-                logger.warning(f"Error analyzing {ticker}: {str(e)}")
-                results.append(StockAnalysis(
-                    ticker=ticker,
-                    status="Error fetching data"
-                ))
+# Handler for HTTP exceptions
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException):
+    """
+    Handle HTTP exceptions with standard format
+    """
+    request_id = getattr(request.state, "request_id", str(uuid.uuid4()))
+    logger.warning(f"HTTP {exc.status_code} error on request {request_id}: {exc.detail}")
+    
+    error_response = ErrorResponse(
+        status_code=exc.status_code,
+        error=get_error_title(exc.status_code),
+        detail=exc.detail,
+        path=request.url.path,
+        timestamp=time.strftime("%Y-%m-%d %H:%M:%S"),
+        request_id=request_id
+    )
+    
+    return JSONResponse(
+        status_code=exc.status_code,
+        headers=exc.headers,
+        content=error_response.model_dump()
+    )
 
-        return results
-    except Exception as e:
-        logger.error(f"Error in stock recommendations: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error in stock recommendations: {str(e)}")
+# General exception handler
+@app.exception_handler(Exception)
+async def general_exception_handler(request: Request, exc: Exception):
+    """
+    Catch-all handler for unhandled exceptions
+    """
+    request_id = getattr(request.state, "request_id", str(uuid.uuid4()))
+    logger.error(f"Unhandled exception on request {request_id}: {str(exc)}")
+    logger.error(traceback.format_exc())
+    
+    error_response = ErrorResponse(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        error="Internal Server Error",
+        detail="An unexpected error occurred. Please try again later.",
+        path=request.url.path,
+        timestamp=time.strftime("%Y-%m-%d %H:%M:%S"),
+        request_id=request_id
+    )
+    
+    return JSONResponse(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        content=error_response.model_dump()
+    )
 
+# Utility function to safely get request body
+async def get_request_body(request: Request) -> Dict:
+    """
+    Get request body as JSON or string, handling potential errors
+    """
+    try:
+        return await request.json()
+    except json.JSONDecodeError:
+        try:
+            body = await request.body()
+            return {"raw": body.decode("utf-8")}
+        except:
+            return {"raw": "<Failed to decode body>"}
 
-@app.get("/")
-def read_root():
-    """Root endpoint with API information"""
-    return {
-        "api": "Investment Profile API",
-        "version": "1.0.0",
-        "endpoints": {
-            "/asset_options": "Get list of available asset options",
-            "/analyze_profile": "Submit user profile and get investment categorization with recommendations",
-            "/questionnaire": "Get the structure of the questionnaire for the frontend"
-        }
+# Utility function to map status codes to error titles
+def get_error_title(status_code: int) -> str:
+    """
+    Map status codes to human-readable titles
+    """
+    status_titles = {
+        400: "Bad Request",
+        401: "Unauthorized",
+        403: "Forbidden",
+        404: "Not Found",
+        405: "Method Not Allowed",
+        406: "Not Acceptable",
+        409: "Conflict",
+        413: "Request Entity Too Large",
+        415: "Unsupported Media Type",
+        422: "Validation Error",
+        429: "Too Many Requests",
+        500: "Internal Server Error",
+        501: "Not Implemented",
+        502: "Bad Gateway",
+        503: "Service Unavailable"
     }
+    return status_titles.get(status_code, "Error")
 
-
-@app.options("/")
-async def options_root():
-    """Handle OPTIONS request for root endpoint"""
-    return {}
-
-
-@app.head("/")
-async def head_root():
-    """Handle HEAD request for root endpoint"""
-    return {}
-
-
-@app.get("/asset_options", response_model=List[str])
-def get_asset_options():
-    """Endpoint to return available asset options"""
-    return asset_options
-
-
+# Sample endpoint that shows how to properly handle exceptions
 @app.post("/analyze_profile", response_model=UserCategorization)
-async def analyze_profile(user_profile: UserProfile):
+async def analyze_profile(request: Request, user_profile: UserProfile):
+    """
+    Analyze user investment profile and recommend stocks
+    """
+    # Get request ID for tracking
+    request_id = getattr(request.state, "request_id", str(uuid.uuid4()))
+    logger.info(f"Processing profile analysis (ID: {request_id})")
+    
     try:
+        # Log the request data at debug level
+        logger.debug(f"Profile data: {user_profile.model_dump()}")
+        
         # Validate assets indices
         for asset_idx in user_profile.assets:
             if asset_idx < 0 or asset_idx >= len(asset_options):
@@ -256,132 +278,68 @@ async def analyze_profile(user_profile: UserProfile):
         
         # Categorize user
         category = categorize_user(user_vector)
+        logger.info(f"User categorized as: {category}")
         
         # Get stock recommendations
         stocks = recommend_stocks(category)
         
-        return UserCategorization(
+        response = UserCategorization(
             category=category,
             recommendations=stocks
         )
-    except HTTPException as he:
-        # Re-raise HTTP exceptions
-        raise he
-    except Exception as e:
-        logger.error(f"Error analyzing profile: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error analyzing profile: {str(e)}")
+        
+        return response
+    except HTTPException as exc:
+        # Re-raise HTTP exceptions to be handled by the HTTP exception handler
+        raise exc
+    except Exception as exc:
+        # Log unexpected errors
+        logger.error(f"Unexpected error in analyze_profile: {str(exc)}")
+        logger.error(traceback.format_exc())
+        
+        # Raise as HTTPException to be handled by the HTTP exception handler
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to analyze profile: {str(exc)}"
+        )
 
-
-# Additional endpoint to get questionnaire structure
-@app.get("/questionnaire")
-def get_questionnaire():
-    """Return the structure of the questionnaire for the frontend"""
+# Health check endpoint
+@app.get("/health")
+async def health_check():
+    """
+    Health check endpoint for monitoring
+    """
+    # Simple health check - could be expanded to check external dependencies
     return {
-        "questions": [
-            {
-                "id": "goal",
-                "title": "What is your primary investment goal?",
-                "options": [
-                    {"value": 0, "label": "Wealth Creation (Long-term growth)"},
-                    {"value": 1, "label": "Passive Income (Regular returns)"},
-                    {"value": 2, "label": "Short-Term Gains (Quick profits)"},
-                    {"value": 3, "label": "Learning (Educational purpose)"}
-                ]
-            },
-            {
-                "id": "risk",
-                "title": "What is your risk tolerance level?",
-                "options": [
-                    {"value": 0, "label": "Conservative (Minimal risk)"},
-                    {"value": 1, "label": "Moderate (Balanced approach)"},
-                    {"value": 2, "label": "Aggressive (Higher risk for higher returns)"},
-                    {"value": 3, "label": "Speculative (Willing to take substantial risks)"}
-                ]
-            },
-            {
-                "id": "frequency",
-                "title": "How often do you plan to trade?",
-                "options": [
-                    {"value": 0, "label": "Daily (Active trading)"},
-                    {"value": 1, "label": "Weekly (Regular monitoring)"},
-                    {"value": 2, "label": "Monthly (Periodic review)"},
-                    {"value": 3, "label": "Occasionally (As opportunities arise)"}
-                ]
-            },
-            {
-                "id": "assets",
-                "title": "Which assets are you interested in? (Select all that apply)",
-                "multiSelect": True,
-                "options": [
-                    {"value": 0, "label": "Stocks (Large-cap)"},
-                    {"value": 1, "label": "Stocks (Mid-cap)"},
-                    {"value": 2, "label": "Stocks (Small-cap)"}
-                ]
-            },
-            {
-                "id": "volatility_reaction",
-                "title": "How do you typically react to market volatility?",
-                "options": [
-                    {"value": 0, "label": "Hold (Stay invested)"},
-                    {"value": 1, "label": "Buy the dip (See opportunity)"},
-                    {"value": 2, "label": "Sell to cut losses (Risk averse)"},
-                    {"value": 3, "label": "Hedge (Seek protection)"}
-                ]
-            },
-            {
-                "id": "time_horizon",
-                "title": "What is your investment time horizon?",
-                "options": [
-                    {"value": 0, "label": "Less than 1 month (Very short-term)"},
-                    {"value": 1, "label": "1–6 months (Short-term)"},
-                    {"value": 2, "label": "6 months–3 years (Medium-term)"},
-                    {"value": 3, "label": "3+ years (Long-term)"}
-                ]
-            },
-            {
-                "id": "decision_making",
-                "title": "How do you make your trading decisions?",
-                "options": [
-                    {"value": 0, "label": "Technical Analysis"},
-                    {"value": 1, "label": "Fundamental Analysis"},
-                    {"value": 2, "label": "News and Events"},
-                    {"value": 3, "label": "Social Media/Community"},
-                    {"value": 4, "label": "Algorithm/Bot Based"}
-                ]
-            },
-            {
-                "id": "emotion",
-                "title": "What emotion primarily drives your trading decisions?",
-                "options": [
-                    {"value": 0, "label": "Confidence (Based on research)"},
-                    {"value": 1, "label": "Fear (Of missing out or losing)"},
-                    {"value": 2, "label": "Greed (Desire for high returns)"},
-                    {"value": 3, "label": "FOMO (Fear of missing out)"}
-                ]
-            },
-            {
-                "id": "capital",
-                "title": "What is your starting capital range?",
-                "options": [
-                    {"value": 0, "label": "Less than ₹10,000"},
-                    {"value": 1, "label": "₹10,000 – ₹50,000"},
-                    {"value": 2, "label": "₹50,000 – ₹2,00,000"},
-                    {"value": 3, "label": "More than ₹2,00,000"}
-                ]
-            },
-            {
-                "id": "trading_style",
-                "title": "What is your preferred trading approach?",
-                "options": [
-                    {"value": 0, "label": "Fully Automated (Algorithm-based)"},
-                    {"value": 1, "label": "Semi-Automated (Mix of manual and automated)"},
-                    {"value": 2, "label": "Manual (Complete manual control)"}
-                ]
-            }
-        ]
+        "status": "healthy",
+        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "api_version": "1.0.0"
     }
 
+# Debug endpoint to test validation errors (handy for troubleshooting)
+@app.get("/test-validation")
+async def test_validation():
+    """
+    Test endpoint that shows how validation errors are handled
+    """
+    # Simulate validation error by raising a ValidationError
+    data = {"invalid_key": "value"}
+    raise RequestValidationError([{
+        "loc": ("body", "user_profile", "assets"),
+        "msg": "field required",
+        "type": "value_error.missing"
+    }])
 
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+# Debug endpoint to test JSON errors
+@app.post("/test-json")
+async def test_json(request: Request):
+    """
+    Test endpoint that helps debug JSON parsing issues
+    """
+    try:
+        # Attempt to parse JSON
+        data = await request.json()
+        return {"received": data}
+    except json.JSONDecodeError as e:
+        # This should be caught by the exception handler
+        raise e
